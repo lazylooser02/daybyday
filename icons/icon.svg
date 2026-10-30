@@ -4,10 +4,19 @@
       <stop offset="0" stop-color="#f7c6d6"/>
       <stop offset="1" stop-color="#c9b8ee"/>
     </linearGradient>
+    <linearGradient id="tick" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ee8fb0"/>
+      <stop offset="1" stop-color="#9a86d6"/>
+    </linearGradient>
   </defs>
   <rect width="512" height="512" fill="url(#bg)"/>
-  <circle cx="256" cy="256" r="150" fill="none" stroke="#ffffff" stroke-opacity="0.45" stroke-width="22"/>
-  <path d="M256 106 A150 150 0 1 1 126 331" fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
-  <text x="256" y="290" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="128" font-weight="700" fill="#ffffff">60</text>
-  <path d="M256 330 c-10 -14 -30 -14 -30 4 c0 14 18 24 30 34 c12 -10 30 -20 30 -34 c0 -18 -20 -18 -30 -4z" fill="#ffffff"/>
+  <!-- calendar page -->
+  <rect x="136" y="150" width="240" height="226" rx="40" fill="#ffffff"/>
+  <path d="M136 206 v-16 a40 40 0 0 1 40 -40 h160 a40 40 0 0 1 40 40 v16 z" fill="#fbe3ec"/>
+  <rect x="190" y="124" width="22" height="58" rx="11" fill="#ffffff" stroke="#e9cfe0" stroke-width="6"/>
+  <rect x="300" y="124" width="22" height="58" rx="11" fill="#ffffff" stroke="#e9cfe0" stroke-width="6"/>
+  <!-- check -->
+  <path d="M196 290 l40 40 l84 -88" fill="none" stroke="url(#tick)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- sparkle -->
+  <path d="M392 112 q6 26 32 32 q-26 6 -32 32 q-6 -26 -32 -32 q26 -6 32 -32z" fill="#ffffff"/>
 </svg>
