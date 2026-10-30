@@ -1,7 +1,7 @@
 /* Service worker: caches the app shell so it opens instantly and offline.
    Your data is NOT cached here — it always goes to/from Google Sheets.
    Bump CACHE_VERSION whenever you change index.html, style.css or script.js. */
-const CACHE_VERSION = 'mt60-v2';
+const CACHE_VERSION = 'daybyday-v4';
 const APP_SHELL = [
   './',
   './index.html',

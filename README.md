@@ -1,6 +1,6 @@
-# My 60-Day Transformation — Setup Guide
+# DaybyDay · Transformation — Setup Guide
 
-A free, mobile-first tracker for your 60-day diet and lifestyle plan.
+A free, mobile-first tracker for your diet and lifestyle transformation. You choose how many days (60 by default) and can extend it any time.
 It's built from plain **HTML + CSS + JavaScript**, hosted free on **GitHub Pages**, and stores every entry in **your own Google Sheet** through a small **Google Apps Script**.
 
 This guide assumes you've never done this before. It takes about **20–30 minutes**, once.
@@ -116,14 +116,16 @@ iPhone (website)  ──►  Apps Script web app  ──►  Your Google Sheet
 3. Wait 1–2 minutes, then refresh. You'll see: **Your site is live at `https://<your-username>.github.io/my-60-days/`**
 4. Open that link to check it loads.
 
-> **Updating the site later:** upload the changed file(s) again (same names) and commit. If you changed `index.html`, `style.css` or `script.js`, also change `CACHE_VERSION` in `service-worker.js` (e.g. `mt60-v1` → `mt60-v2`) so phones pick up the new version straight away.
+> **Updating the site later:** upload the changed file(s) again (same names) and commit. If you changed `index.html`, `style.css` or `script.js`, also change `CACHE_VERSION` in `service-worker.js` (e.g. `daybyday-v3` → `daybyday-v4`) so phones pick up the new version straight away.
 
 ---
+
+> **Already uploaded the earlier version?** Upload the new `index.html`, `style.css`, `script.js`, `manifest.json`, `service-worker.js` and the `icons` folder again (replace the old ones), and commit. Your data stays safe in Google Sheets. **To get the new DaybyDay icon and name on your iPhone, delete the old Home Screen icon and add it again** (iPhone saves the icon when you first add it). You'll need to paste the URL and token in Settings again after re-adding.
 
 ## Step 4: Connect the website to your sheet
 
 1. Open your GitHub Pages link.
-2. The welcome screen asks for your **Day 1 start date**. Pick it and tap **Start my 60 days**.
+2. The welcome screen asks for your **Day 1 start date** and **number of days** (60 is a good start). Tap **Start my journey**.
 3. Tap the ⚙️ **Settings** icon (top right).
 4. Under **Google Sheets connection**:
    - paste the **Web app URL** from Step 2d
@@ -147,7 +149,7 @@ iPhone (website)  ──►  Apps Script web app  ──►  Your Google Sheet
 3. Scroll down and tap **Add to Home Screen**.
    *(On newer iOS you may need **⋯ More → Add to Home Screen**.)*
 4. Make sure **Open as Web App** is on, if you see that option.
-5. Name it **My 60 Days** → **Add**.
+5. Name it **DaybyDay** → **Add**.
 6. Open it from the Home Screen. It runs full-screen like an app.
 7. **Enter the URL and token in Settings again inside the Home Screen app.** iPhone keeps Home Screen apps separate from Safari, so the app doesn't see what you typed in Safari.
 
@@ -157,13 +159,14 @@ The site still works fine if you just open it in Safari.
 
 ## Using the app
 
-**Bottom tabs:** Routine · Food · Exercise · Progress. The summary card at the top shows day X/60, program %, calories, protein, water, streak, weight and routine %.
+**Bottom tabs:** Routine · Food · Exercise · Progress. The summary card at the top shows Day X of your program length, program %, calories, protein, water, streak, weight and routine %.
 
 **Date bar:** use ‹ › or tap the date to go to any earlier day. You can view and edit past days.
 
 ### Routine
 - Tick / untick each habit. Tap ✏️ to add a note.
-- Hair wash shows only on **Mon & Fri**, hair/body oil only on **Thursday**, the night oil only on **Sunday**.
+- Hair wash shows only on **Mon & Fri**, hair/body oil only on **Thursday**, the night oil only on **Sunday**. You can change any of this.
+- **Edit your routine:** go to ⚙️ **Settings → Daily routine**. There you can rename a habit, change its time, pick which weekdays it appears (tap the day buttons, or **Set every day**), reorder it with ▲ ▼, delete it 🗑️, or **+ Add habit**. Tap **Save routine** when you're done. Removing a habit hides it from now on, but its past ticks stay in your Google Sheet.
 - Filters: **All / To do / Done**. On past days "To do" becomes **Missed**.
 - Nothing is ever ticked automatically based on the time.
 
@@ -180,14 +183,15 @@ The site still works fine if you just open it in Safari.
 - Enter your total steps, tap +500 / +1,000 / +2,000, or type any number into **Add steps** (e.g. 1,250 after a walk) to add it to the day's total. Also log walking minutes, exercise minutes, exercise type(s) and optional calories burned. Everything saves automatically.
 
 ### Progress
-- Day X / 60, % completed, days remaining, start date and end date, all worked out from your start date. **Missing a day never resets your progress.**
+- Day X / your total days, % completed, days remaining, start date and end date, all worked out from your start date. **Missing a day never resets your progress.**
 - **Streaks:** a day counts as "completed" when you meet the minimum number of goals (default **4 of 6**: routine ≥ 80%, calories within target, protein, water, steps, exercise). Change this in **Settings → Streak rules**, so one missed optional habit doesn't break your streak.
-- **60-day calendar:** pink = completed, lavender = partial, grey = missed. Tap any day to open it.
+- **Extend your program:** in **Settings → Program & daily targets**, change **Program length (days)** or tap **+7 / +30 / +60 days**. In your last week, the Progress tab also shows **+7 days / Extend +30 days** buttons. All your progress, streaks and history are kept.
+- **Calendar:** one square per program day (it grows when you extend). Pink = completed, lavender = partial, grey = missed. Tap any day to open it.
 - **Weight & BMI:** BMI = weight (kg) ÷ height (m)², using your height (161 cm, editable). The charts show only weights you actually entered, never estimates. Use **+ Log** to add a weight on any day (e.g. your Day 1 weight).
 - **Sunday check-in:** opens automatically on Sundays. If you miss Sunday, it appears the next time you open the app. Once you submit it, it stops asking. The averages are filled in from your logs, and you can edit them.
 
 ### Settings
-Start date, calorie/protein/fibre/water/step/exercise targets, flexible allowance, height, weight unit (kg/lb), streak rules, routine timings, the weekly meal schedule (edit, add, remove, or copy one day to all days), the Google Sheets connection, and **CSV export** for each tab.
+Start date, program length (extendable), calorie/protein/fibre/water/step/exercise targets, flexible allowance, height, weight unit (kg/lb), streak rules, the full routine editor (names, times, days, order, add/remove), the weekly meal schedule (edit, add, remove, or copy one day to all days), the Google Sheets connection, and **CSV export** for each tab.
 
 ---
 

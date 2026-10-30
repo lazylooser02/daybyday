@@ -1,5 +1,5 @@
 /* =========================================================
-   My 60-Day Transformation — app logic (vanilla JS)
+   DaybyDay · Transformation tracker — app logic (vanilla JS)
    Google Sheets (via Apps Script) is the permanent database.
    localStorage is used only as an offline cache + unsaved-change queue.
    ========================================================= */
@@ -9,7 +9,7 @@
   /* ---------------------------------------------------------
      Constants & defaults
      --------------------------------------------------------- */
-  const PROGRAM_DAYS = 60;
+  const DEFAULT_LEN = 60;
   const LS_CACHE = 'mt60_cache_v1';
   const LS_PENDING = 'mt60_pending_v1';
   const LS_CONN = 'mt60_connection_v1';
@@ -119,6 +119,7 @@
   function defaultSettings() {
     return {
       start_date: '',
+      program_days: DEFAULT_LEN,
       calorie_target: 1600,
       protein_target: 60,
       fibre_target: 25,
@@ -214,6 +215,7 @@
     exercise: 'Exercise_Logs',
     weight: 'Weight_Logs',
     checkins: 'Weekly_Checkins',
+    periods: 'Period_Logs',
     settings: 'Settings'
   };
   const SHEET_TO_KEY = {};
@@ -229,7 +231,7 @@
   let viewDate = todayStr();
   let openNotes = {}; // routine key -> bool (notes panel open)
 
-  function emptyDb() { return { daily: {}, routine: {}, food: {}, exercise: {}, weight: {}, checkins: {} }; }
+  function emptyDb() { return { daily: {}, routine: {}, food: {}, exercise: {}, weight: {}, checkins: {}, periods: {} }; }
   function saveCache() { lsSet(LS_CACHE, { settings: settings, db: db, lastSynced: lastSynced }); }
   function saveUi() { lsSet(LS_UI, { tab: ui.tab, routineFilter: ui.routineFilter }); }
 
@@ -305,7 +307,11 @@
         setSyncPill('ok', 'Saved');
       } catch (err) {
         setSyncPill('err', 'Not saved');
-        toast('Could not save to Google Sheets: ' + err.message + '. Your changes are kept on this device and will retry.', 'err', 5000);
+        if (/Unknown sheet/.test(err.message)) {
+          toast('Your Apps Script is out of date. Paste the new Code.gs and deploy a new version (README → Updating Code.gs). Changes are kept on this device.', 'err', 8000);
+        } else {
+          toast('Could not save to Google Sheets: ' + err.message + '. Your changes are kept on this device and will retry.', 'err', 5000);
+        }
         clearTimeout(this.retryTimer);
         this.retryTimer = setTimeout(function () { Sync.flush(); }, 20000);
       } finally {
@@ -380,6 +386,7 @@
   function normalizeRecord(key, r) {
     const out = Object.assign({}, r);
     if (out.date !== undefined) out.date = String(out.date).slice(0, 10);
+    ['start_date', 'end_date'].forEach(function (f) { if (out[f]) out[f] = String(out[f]).slice(0, 10); });
     if (key === 'routine') out.done = bool(out.done);
     if (key === 'daily') out.completed = bool(out.completed);
     ['calories', 'protein', 'fibre', 'water_ml', 'steps', 'walking_min', 'exercise_min', 'calories_burned', 'weight_kg', 'height_cm', 'bmi'].forEach(function (f) {
@@ -410,9 +417,10 @@
      Domain logic
      --------------------------------------------------------- */
   function startDate() { return isValidDate(settings.start_date) ? settings.start_date : ''; }
-  function endDate() { return startDate() ? addDays(startDate(), PROGRAM_DAYS - 1) : ''; }
+  function programDays() { return Math.max(1, Math.min(1000, Math.round(num(settings.program_days, DEFAULT_LEN)))); }
+  function endDate() { return startDate() ? addDays(startDate(), programDays() - 1) : ''; }
   function dayNumber(date) { return startDate() ? diffDays(startDate(), date) + 1 : 0; }
-  function inProgram(date) { const n = dayNumber(date); return n >= 1 && n <= PROGRAM_DAYS; }
+  function inProgram(date) { const n = dayNumber(date); return n >= 1 && n <= programDays(); }
 
   function routinesFor(date) {
     const wd = weekday(date);
@@ -553,6 +561,72 @@
     return (r > 0 ? '+' : r < 0 ? '−' : '±') + fmt1(Math.abs(r)) + (unit ? ' ' + unit : '');
   }
 
+  const FLOWS = ['Spotting', 'Light', 'Medium', 'Heavy'];
+  const SYMPTOMS = ['Cramps', 'Bloating', 'Headache', 'Back pain', 'Fatigue', 'Mood changes', 'Acne', 'Cravings', 'Tender breasts'];
+  const ONGOING_MAX = 10; // an open period older than this is treated as "end date not set"
+
+  function periodsSorted() {
+    return Object.values(db.periods).filter(function (p) { return isValidDate(p.start_date); })
+      .sort(function (a, b) { return a.start_date < b.start_date ? -1 : 1; });
+  }
+  function periodLength(p) { return isValidDate(p.end_date) ? diffDays(p.start_date, p.end_date) + 1 : null; }
+  function mean(a) { return a.length ? a.reduce(function (x, y) { return x + y; }, 0) / a.length : 0; }
+
+  function cycleStats() {
+    const ps = periodsSorted();
+    const today = todayStr();
+    const cycles = [];
+    for (let i = 0; i < ps.length - 1; i++) {
+      const len = diffDays(ps[i].start_date, ps[i + 1].start_date);
+      if (len > 0) cycles.push({ start: ps[i].start_date, length: len, period: periodLength(ps[i]) });
+    }
+    const recent = cycles.slice(-6).map(function (c) { return c.length; }).filter(function (l) { return l >= 15 && l <= 90; });
+    const pLens = ps.map(periodLength).filter(function (l) { return l && l <= 15; }).slice(-6);
+    const out = {
+      periods: ps, cycles: cycles,
+      avgCycle: recent.length ? Math.round(mean(recent)) : 0,
+      avgPeriod: pLens.length ? Math.round(mean(pLens)) : 0,
+      last: ps[ps.length - 1] || null,
+      onPeriod: false, periodDay: 0, cycleDay: 0, next: '', daysUntil: null, openEnded: false
+    };
+    if (out.last && out.last.start_date <= today) {
+      const l = out.last;
+      out.cycleDay = diffDays(l.start_date, today) + 1;
+      if (isValidDate(l.end_date)) out.onPeriod = today <= l.end_date;
+      else if (out.cycleDay <= ONGOING_MAX) { out.onPeriod = true; out.openEnded = true; }
+      if (out.onPeriod) out.periodDay = out.cycleDay;
+      if (out.avgCycle) {
+        out.next = addDays(l.start_date, out.avgCycle);
+        out.daysUntil = diffDays(today, out.next);
+      }
+    }
+    return out;
+  }
+
+  // dates that fall inside a logged period (for the calendar)
+  function periodDateSet() {
+    const set = {};
+    const today = todayStr();
+    periodsSorted().forEach(function (p) {
+      let end = isValidDate(p.end_date) ? p.end_date : (diffDays(p.start_date, today) < ONGOING_MAX ? today : p.start_date);
+      if (end > today) end = today;
+      for (let d = p.start_date; d <= end; d = addDays(d, 1)) set[d] = true;
+    });
+    return set;
+  }
+
+  function savePeriod(rec, oldId) {
+    if (oldId && oldId !== rec.id) {
+      delete db.periods[oldId];
+      Sync.queueDelete('periods', oldId);
+    }
+    rec.period_days = isValidDate(rec.end_date) ? diffDays(rec.start_date, rec.end_date) + 1 : '';
+    rec.updated_at = nowIso();
+    db.periods[rec.id] = rec;
+    Sync.queue('periods', rec);
+    saveCache();
+  }
+
   function pendingCheckinWeek() {
     const s = startDate();
     if (!s) return null;
@@ -613,20 +687,20 @@
     let ringHtml, title, sub, pctLine;
 
     if (!s) {
-      ringHtml = ring(0, '—', 'of 60');
+      ringHtml = ring(0, '—', 'of ' + programDays());
       title = 'Welcome!';
-      sub = 'Set your start date to begin your 60 days.';
+      sub = 'Set your start date to begin your transformation.';
       pctLine = '<button class="btn sm" data-action="open-settings" type="button">Set start date</button>';
     } else if (n < 1) {
-      ringHtml = ring(0, '0', 'of 60');
+      ringHtml = ring(0, '0', 'of ' + programDays());
       title = 'Starts ' + prettyDate(s);
       sub = 'Your journey begins in ' + (1 - n) + ' day' + (1 - n === 1 ? '' : 's') + '.';
       pctLine = '';
     } else {
-      const shown = Math.min(n, PROGRAM_DAYS);
-      const prog = Math.round(pct(shown, PROGRAM_DAYS));
-      ringHtml = ring(prog, String(shown), 'of 60');
-      title = n > PROGRAM_DAYS ? '60 days complete 🎉' : 'Day ' + shown + ' of 60';
+      const shown = Math.min(n, programDays());
+      const prog = Math.round(pct(shown, programDays()));
+      ringHtml = ring(prog, String(shown), 'of ' + programDays());
+      title = n > programDays() ? programDays() + ' days complete 🎉' : 'Day ' + shown + ' of ' + programDays();
       sub = prettyDate(viewDate, true);
       pctLine = '<p class="pct-line">' + prog + '% of program · ' + c.goals_met + '/' + c.goals_enabled + ' goals today</p>';
     }
@@ -838,19 +912,20 @@
     }
 
     if (!s) {
-      html += '<div class="card"><div class="empty"><span class="emoji">🗓️</span>Choose your start date in Settings to begin the 60-day counter.<br><br><button class="btn" type="button" data-action="open-settings">Set start date</button></div></div>';
+      html += '<div class="card"><div class="empty"><span class="emoji">🗓️</span>Choose your start date in Settings to begin your day counter.<br><br><button class="btn" type="button" data-action="open-settings">Set start date</button></div></div>';
     } else {
       const n = dayNumber(today);
-      const shown = Math.max(0, Math.min(n, PROGRAM_DAYS));
-      const prog = Math.round(pct(shown, PROGRAM_DAYS));
-      const remaining = Math.max(0, PROGRAM_DAYS - shown);
-      const elapsed = Math.max(0, Math.min(n, PROGRAM_DAYS));
+      const shown = Math.max(0, Math.min(n, programDays()));
+      const prog = Math.round(pct(shown, programDays()));
+      const remaining = Math.max(0, programDays() - shown);
+      const elapsed = Math.max(0, Math.min(n, programDays()));
       const successRate = elapsed ? Math.round((st.completed / elapsed) * 100) : 0;
       html += '<div class="card day-hero">' +
-        '<p class="eyebrow">' + (n < 1 ? 'Starting soon' : n > PROGRAM_DAYS ? 'Program complete' : 'Your journey') + '</p>' +
-        '<div class="day-big">DAY ' + shown + ' <small>/ 60</small></div>' +
+        '<p class="eyebrow">' + (n < 1 ? 'Starting soon' : n > programDays() ? 'Program complete' : 'Your journey') + '</p>' +
+        '<div class="day-big">DAY ' + shown + ' <small>/ ' + programDays() + '</small></div>' +
         '<div class="line">' + prog + '% COMPLETED · ' + remaining + ' DAYS REMAINING</div>' +
         bar(prog) +
+        (n >= programDays() - 6 ? '<div class="btn-row" style="margin:-2px 0 12px"><button class="btn sm light" type="button" data-action="extend-program" data-n="7">+7 days</button><button class="btn sm" type="button" data-action="extend-program" data-n="30">Extend +30 days</button></div>' : '') +
         '<div class="kv-grid">' +
         kv(prettyDate(s, true), 'Start date') + kv(prettyDate(endDate(), true), 'Target end date') +
         kv(plural(st.completed, 'day'), 'Goal days completed') + kv(successRate + '%', 'Success rate so far') +
@@ -865,20 +940,24 @@
         '</div>';
 
       // calendar
+      const pDates = periodDateSet();
       let cal = '';
-      for (let i = 0; i < PROGRAM_DAYS; i++) {
+      for (let i = 0; i < programDays(); i++) {
         const d = addDays(s, i);
         const c = st.perDay[d];
         let cls = 'future';
         if (d <= today) cls = c && c.completed ? 'done' : (c && c.hasData ? 'partial' : (d < today ? 'missed' : ''));
         if (d === today) cls += ' today';
         if (d === viewDate) cls += ' viewing';
+        if (pDates[d]) cls += ' period';
         cal += '<button type="button" class="cal-day ' + cls + '" data-action="goto-date" data-date="' + d + '" ' + (d > today ? 'disabled' : '') + ' aria-label="Day ' + (i + 1) + ', ' + prettyDate(d) + '">' + (i + 1) + '</button>';
       }
-      html += '<div class="card"><h3 class="card-title" style="margin-bottom:12px">60-day calendar</h3><div class="calendar">' + cal + '</div>' +
-        '<div class="legend"><span><i style="background:#e47fa2"></i>Completed</span><span><i style="background:#efeafb"></i>Partial</span><span><i style="background:#f1e8e8"></i>Missed</span><span><i style="border:1.5px dashed #e8dbe2"></i>Upcoming</span></div>' +
+      html += '<div class="card"><h3 class="card-title" style="margin-bottom:12px">' + programDays() + '-day calendar</h3><div class="calendar">' + cal + '</div>' +
+        '<div class="legend"><span><i style="background:#e47fa2"></i>Completed</span><span><i style="background:#efeafb"></i>Partial</span><span><i style="background:#f1e8e8"></i>Missed</span><span><i style="border:1.5px dashed #e8dbe2"></i>Upcoming</span><span><i class="dot-period"></i>Period</span></div>' +
         '<p class="help" style="margin:8px 0 0">Tap a day to view or edit it.</p></div>';
     }
+
+    html += renderCycleCard();
 
     // weight
     const unit = wUnit();
@@ -940,6 +1019,93 @@
     $('#view-progress').innerHTML = html;
   }
   function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+  function renderCycleCard() {
+    const cs = cycleStats();
+    const today = todayStr();
+    let h = '<div class="card" id="cycleCard"><div class="card-head"><div><h3 class="card-title">Cycle tracker</h3><p class="card-sub">Log current and past periods</p></div>' +
+      '<button class="btn sm light" type="button" data-action="period-log">+ Log</button></div>';
+    if (!cs.periods.length) {
+      return h + '<div class="empty"><span class="emoji">🌸</span>No periods logged yet. Add your recent periods (past dates are fine) to see your cycle length and an estimate of your next period.</div>' +
+        '<div class="btn-row"><button class="btn light" type="button" data-action="period-start-today">Period started today</button><button class="btn secondary" type="button" data-action="period-log">Add a past period</button></div></div>';
+    }
+
+    // status line
+    if (cs.onPeriod) {
+      h += '<div class="cycle-status on"><div><b>Period · day ' + cs.periodDay + '</b><span>' + (cs.openEnded ? 'Started ' + prettyDate(cs.last.start_date) : 'Ends ' + prettyDate(cs.last.end_date)) + '</span></div>' +
+        (cs.openEnded ? '<button class="btn sm" type="button" data-action="period-end-today">Ended today</button>' : '') + '</div>';
+    } else if (cs.cycleDay > 0) {
+      h += '<div class="cycle-status"><div><b>Cycle day ' + cs.cycleDay + '</b><span>Last period started ' + prettyDate(cs.last.start_date) + '</span></div>' +
+        '<button class="btn sm light" type="button" data-action="period-start-today">Started today</button></div>';
+    }
+
+    let nextTxt = '—', nextSub = 'Needs 2 periods';
+    if (cs.next) {
+      nextTxt = shortDate(cs.next);
+      if (cs.onPeriod) nextSub = 'Next estimate';
+      else if (cs.daysUntil > 0) nextSub = 'Estimate · in ' + plural(cs.daysUntil, 'day');
+      else if (cs.daysUntil === 0) nextSub = 'Estimate · today';
+      else nextSub = 'Estimate · ' + plural(-cs.daysUntil, 'day') + ' late';
+    }
+    h += '<div class="kv-grid">' +
+      kv(cs.avgCycle ? plural(cs.avgCycle, 'day') : '—', 'Average cycle') +
+      kv(cs.avgPeriod ? plural(cs.avgPeriod, 'day') : '—', 'Average period') +
+      kv(nextTxt, nextSub) +
+      kv(plural(cs.periods.length, 'period'), 'Logged') +
+      '</div>';
+
+    if (cs.cycles.length) {
+      h += '<div style="margin-top:14px">' + cycleChart(cs.cycles.slice(-8), cs.avgCycle) + '</div>' +
+        '<div class="legend" style="margin-top:4px"><span><i style="background:#9a86d6"></i>Cycle length</span><span><i style="background:#e47fa2"></i>Period length</span>' +
+        (cs.avgCycle ? '<span><i style="background:transparent;border-top:2px dashed #b3a6d9;height:0;border-radius:0"></i>Average</span>' : '') + '</div>';
+    } else {
+      h += '<p class="help" style="margin:12px 0 0">Log one more period to see your cycle chart.</p>';
+    }
+    h += '<p class="help" style="margin:10px 0 0">Estimates are averages of your recent cycles, not medical advice. Typical adult cycles are 21–35 days.</p>';
+
+    h += '<ul class="history" style="margin-top:8px">' + cs.periods.slice().reverse().map(function (p) {
+      const len = periodLength(p);
+      const open = !isValidDate(p.end_date);
+      return '<li><div class="h-main"><b>' + prettyDate(p.start_date, p.start_date.slice(0, 4) !== today.slice(0, 4)) +
+        (len ? ' – ' + shortDate(p.end_date) : '') + '</b><small>' +
+        (len ? plural(len, 'day') : (open && diffDays(p.start_date, today) < ONGOING_MAX ? 'Ongoing' : 'End date not set')) +
+        (p.flow ? ' · ' + esc(p.flow) : '') + (p.symptoms ? ' · ' + esc(p.symptoms) : '') + '</small></div>' +
+        '<button class="mini-btn" type="button" data-action="period-edit" data-id="' + esc(p.id) + '" aria-label="Edit period">' + ICON.edit + '</button></li>';
+    }).join('') + '</ul></div>';
+    return h;
+  }
+
+  // Grouped bars: cycle length + period length for each completed cycle
+  function cycleChart(cycles, avg) {
+    const W = 340, H = 180, L = 28, R = 8, T = 18, B = 28;
+    const top = Math.max(40, Math.ceil(Math.max.apply(null, cycles.map(function (c) { return c.length; })) / 10) * 10);
+    const Y = function (v) { return T + (1 - v / top) * (H - T - B); };
+    const slot = (W - L - R) / cycles.length;
+    const bw = Math.max(6, Math.min(18, slot * 0.3));
+    let g = '';
+    for (let v = 0; v <= top; v += 10) {
+      g += '<line class="grid-line" x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '"/>' +
+        '<text class="axis-label" x="' + (L - 5) + '" y="' + (Y(v) + 3).toFixed(1) + '" text-anchor="end">' + v + '</text>';
+    }
+    const every = Math.ceil(cycles.length / 5);
+    cycles.forEach(function (c, i) {
+      const cx = L + slot * i + slot / 2;
+      const x1 = cx - bw - 1, x2 = cx + 1;
+      g += '<rect x="' + x1.toFixed(1) + '" y="' + Y(c.length).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (Y(0) - Y(c.length)).toFixed(1) + '" rx="4" fill="#9a86d6"><title>Cycle from ' + shortDate(c.start) + ': ' + c.length + ' days</title></rect>' +
+        '<text class="pt-label" x="' + (x1 + bw / 2).toFixed(1) + '" y="' + (Y(c.length) - 4).toFixed(1) + '" text-anchor="middle">' + c.length + '</text>';
+      if (c.period) {
+        g += '<rect x="' + x2.toFixed(1) + '" y="' + Y(c.period).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (Y(0) - Y(c.period)).toFixed(1) + '" rx="4" fill="#e47fa2"><title>Period: ' + c.period + ' days</title></rect>' +
+          '<text class="pt-label" x="' + (x2 + bw / 2).toFixed(1) + '" y="' + (Y(c.period) - 4).toFixed(1) + '" text-anchor="middle">' + c.period + '</text>';
+      }
+      if (i % every === 0 || i === cycles.length - 1) {
+        g += '<text class="axis-label" x="' + cx.toFixed(1) + '" y="' + (H - 9) + '" text-anchor="middle">' + shortDate(c.start) + '</text>';
+      }
+    });
+    if (avg) {
+      g += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(avg).toFixed(1) + '" y2="' + Y(avg).toFixed(1) + '" stroke="#b3a6d9" stroke-width="1.5" stroke-dasharray="5 4"/>';
+    }
+    return '<svg class="chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Cycle and period length chart">' + g + '</svg>';
+  }
+
   function kv(v, k) { return '<div class="kv"><b>' + v + '</b><span>' + k + '</span></div>'; }
 
   function trendText(ws) {
@@ -1047,6 +1213,14 @@
     refreshDaily(viewDate);
   }
 
+  function extendProgram(n) {
+    if (!(n > 0)) return;
+    settings.program_days = programDays() + n;
+    saveSettingKeys(['program_days']);
+    renderAll();
+    toast('Extended to ' + programDays() + ' days · new end date ' + prettyDate(endDate(), true), 'ok');
+  }
+
   function saveSettingKeys(keys) {
     keys.forEach(function (k) { Sync.queue('settings', { id: k, value: JSON.stringify(settings[k]), updated_at: nowIso() }); });
     saveCache();
@@ -1104,6 +1278,24 @@
           delete db.weight[t.dataset.id];
           Sync.queueDelete('weight', t.dataset.id);
           saveCache(); renderAll(); toast('Weight entry deleted', 'ok');
+        }
+        break;
+      }
+      case 'extend-program': extendProgram(num(t.dataset.n)); break;
+      case 'period-log': openPeriodForm(null); break;
+      case 'period-edit': openPeriodForm(t.dataset.id); break;
+      case 'period-start-today': {
+        const t0 = todayStr();
+        if (db.periods[t0]) { toast('A period is already logged for today'); break; }
+        savePeriod({ id: t0, start_date: t0, end_date: '', flow: '', symptoms: '', notes: '' });
+        renderAll(); toast('Period logged · day 1 🌸', 'ok');
+        break;
+      }
+      case 'period-end-today': {
+        const cs = cycleStats();
+        if (cs.last && !isValidDate(cs.last.end_date)) {
+          savePeriod(Object.assign({}, cs.last, { end_date: todayStr() }));
+          renderAll(); toast('Period marked as ended · ' + plural(diffDays(cs.last.start_date, todayStr()) + 1, 'day'), 'ok');
         }
         break;
       }
@@ -1263,6 +1455,72 @@
     saveCache();
   }
 
+  /* ----- Period form (current or past) ----- */
+  function openPeriodForm(id) {
+    const p = id ? db.periods[id] : null;
+    const t = todayStr();
+    const syms = p && p.symptoms ? String(p.symptoms).split(',').map(function (x) { return x.trim(); }) : [];
+    openModal(
+      '<h3 id="sheetTitle">' + (p ? 'Edit period' : 'Log a period') + '</h3>' +
+      '<p class="sub">Past dates are fine — add as many earlier periods as you remember.</p>' +
+      '<form id="periodForm" novalidate>' +
+      '<div class="grid-2">' +
+      '<label class="field"><span>Start date *</span><input type="date" name="start" max="' + t + '" value="' + esc(p ? p.start_date : '') + '" required></label>' +
+      '<label class="field"><span>End date</span><input type="date" name="end" max="' + t + '" value="' + esc(p && isValidDate(p.end_date) ? p.end_date : '') + '"></label>' +
+      '</div>' +
+      '<p class="help">Leave the end date empty if it’s still going.</p>' +
+      '<label class="field"><span>Flow</span><select name="flow"><option value="">Select…</option>' + FLOWS.map(function (f) { return '<option' + (p && p.flow === f ? ' selected' : '') + '>' + f + '</option>'; }).join('') + '</select></label>' +
+      '<div class="field"><span>Symptoms</span></div>' +
+      '<div class="chips" id="symChips">' + SYMPTOMS.map(function (x) {
+        const on = syms.indexOf(x) > -1;
+        return '<button type="button" class="' + (on ? 'on' : '') + '" data-sym="' + esc(x) + '" aria-pressed="' + on + '">' + esc(x) + '</button>';
+      }).join('') + '</div>' +
+      '<label class="field"><span>Notes</span><textarea name="notes" rows="2" maxlength="500" placeholder="Optional">' + esc(p ? p.notes : '') + '</textarea></label>' +
+      '<div class="btn-row">' +
+      (p ? '<button type="button" class="btn danger" id="deletePeriod">Delete</button>' : '<button type="button" class="btn secondary" data-close>Cancel</button>') +
+      (p ? '' : '<button type="submit" class="btn secondary" data-again="1">Save &amp; add another</button>') +
+      '<button type="submit" class="btn">Save</button></div>' +
+      '</form>'
+    );
+    const form = $('#periodForm');
+    $('#symChips').addEventListener('click', function (e) {
+      const b = e.target.closest('[data-sym]');
+      if (!b) return;
+      b.classList.toggle('on');
+      b.setAttribute('aria-pressed', b.classList.contains('on'));
+    });
+    if (p) {
+      $('#deletePeriod').addEventListener('click', function () {
+        if (!confirm('Delete the period starting ' + prettyDate(p.start_date, true) + '?')) return;
+        delete db.periods[p.id];
+        Sync.queueDelete('periods', p.id);
+        saveCache(); closeModal(); renderAll(); toast('Period deleted', 'ok');
+      });
+    }
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      const again = e.submitter && e.submitter.dataset.again === '1';
+      const start = form.start.value, end = form.end.value;
+      if (!isValidDate(start)) { toast('Please choose a start date', 'err'); form.start.focus(); return; }
+      if (start > t) { toast('Start date can’t be in the future', 'err'); return; }
+      if (end && (!isValidDate(end) || end < start)) { toast('End date must be on or after the start date', 'err'); return; }
+      if (end && end > t) { toast('End date can’t be in the future', 'err'); return; }
+      if (end && diffDays(start, end) > 20) { toast('That’s more than 3 weeks — please check the dates', 'err'); return; }
+      const endOrStart = end || start;
+      const clash = Object.values(db.periods).find(function (o) {
+        if (p && o.id === p.id) return false;
+        const oEnd = isValidDate(o.end_date) ? o.end_date : o.start_date;
+        return start <= oEnd && o.start_date <= endOrStart;
+      });
+      if (clash) { toast('Overlaps the period starting ' + prettyDate(clash.start_date, true), 'err', 4000); return; }
+      const symptoms = $$('#symChips button.on').map(function (b) { return b.dataset.sym; }).join(', ');
+      savePeriod({ id: start, start_date: start, end_date: end || '', flow: form.flow.value, symptoms: symptoms, notes: form.notes.value.trim() }, p ? p.id : null);
+      renderAll();
+      toast('Saved period from ' + prettyDate(start, true), 'ok');
+      if (again) openPeriodForm(null); else closeModal();
+    });
+  }
+
   /* ----- Sunday check-in ----- */
   function weekAverages(sunday) {
     // the 7 days ending on that Sunday (Mon–Sun), limited to program days up to today
@@ -1348,9 +1606,11 @@
      --------------------------------------------------------- */
   let planDay = DAY_KEYS[new Date().getDay()];
   let draftPlan = null;
+  let draftRoutines = [];
 
   function openSettings() {
     draftPlan = JSON.parse(JSON.stringify(settings.meal_plan));
+    draftRoutines = JSON.parse(JSON.stringify(settings.routines));
     renderSettings();
     $('#settingsPage').hidden = false;
     $('#settingsPage').scrollTop = 0;
@@ -1379,7 +1639,12 @@
 
       // Program + targets
       '<form class="card" id="targetsForm" novalidate><h3 class="card-title">Program &amp; daily targets</h3>' +
-      '<label class="field"><span>60-day start date</span><input type="date" name="start_date" value="' + esc(s.start_date) + '"></label>' +
+      '<div class="grid-2">' +
+      '<label class="field"><span>Start date (Day 1)</span><input type="date" name="start_date" value="' + esc(s.start_date) + '"></label>' +
+      numField('Program length (days)', 'program_days', programDays(), 'min="1" max="1000" step="1"') +
+      '</div>' +
+      '<p class="help">' + (startDate() ? 'Ends ' + prettyDate(endDate(), true) + '. ' : '') + 'Want more time? Extend any time — your progress is kept.</p>' +
+      '<div class="btn-row" style="margin-bottom:14px"><button class="btn secondary sm" type="button" data-extend="7">+7 days</button><button class="btn secondary sm" type="button" data-extend="30">+30 days</button><button class="btn secondary sm" type="button" data-extend="60">+60 days</button></div>' +
       '<div class="grid-2">' +
       numField('Calories (kcal)', 'calorie_target', s.calorie_target, 'min="800" max="5000" step="10"') +
       numField('Flexible allowance (kcal)', 'flex_calories', s.flex_calories, 'min="0" max="2000" step="10"') +
@@ -1404,17 +1669,15 @@
       '</form>' +
 
       // Routine timings
-      '<form class="card" id="routineForm" novalidate><h3 class="card-title">Routine timings</h3>' +
-      s.routines.map(function (rt) {
-        return '<div class="routine-edit"><div class="name">' + esc(rt.name) + (rt.days ? '<small>' + rt.days.map(function (d) { return DAY_NAMES[d]; }).join(' & ') + ' only</small>' : '<small>Every day</small>') + '</div>' +
-          '<input type="text" name="time_' + esc(rt.key) + '" value="' + esc(rt.time) + '" maxlength="30" aria-label="Planned time for ' + esc(rt.name) + '"></div>';
-      }).join('') +
-      '<button class="btn block" type="submit" style="margin-top:12px">Save timings</button>' +
-      '</form>' +
+      '<div class="card" id="routineCard"><h3 class="card-title">Daily routine</h3>' +
+      '<p class="help" style="margin-top:-6px">Rename, retime, reorder, add or remove habits, and choose which days each one appears.</p>' +
+      '<div id="routineItems"></div>' +
+      '<div class="btn-row"><button class="btn secondary" type="button" id="addRoutine">+ Add habit</button><button class="btn" type="button" id="saveRoutines">Save routine</button></div>' +
+      '</div>' +
 
       // Meal plan
       '<div class="card" id="mealCard"><h3 class="card-title">Weekly meal schedule</h3>' +
-      '<p class="help" style="margin-top:-6px">Repeats every week for all 60 days. Nutrition values are estimates — adjust to your portions. Past days you already ticked keep their recorded values.</p>' +
+      '<p class="help" style="margin-top:-6px">Repeats every week for your whole program. Nutrition values are estimates — adjust to your portions. Past days you already ticked keep their recorded values.</p>' +
       '<div class="day-tabs">' + DAY_KEYS.map(function (dk, i) { return '<button type="button" class="' + (dk === planDay ? 'on' : '') + '" data-plan-day="' + dk + '">' + DAY_SHORT[i] + '</button>'; }).join('') + '</div>' +
       '<div id="planItems"></div>' +
       '<div class="btn-row"><button class="btn secondary" type="button" id="addPlanItem">+ Add item</button><button class="btn" type="button" id="savePlan">Save meal plan</button></div>' +
@@ -1432,10 +1695,31 @@
       '<div class="card"><h3 class="card-title">This device</h3>' +
       '<p class="help" style="margin-top:-6px">Clears the offline copy on this phone only. Your Google Sheet is not touched. Unsaved changes will be lost.</p>' +
       '<button class="btn danger block" type="button" id="clearCache">Clear local cache</button></div>' +
-      '<p class="help" style="text-align:center">My 60-Day Transformation · data lives in your Google Sheet</p>';
+      '<p class="help" style="text-align:center">DaybyDay · data lives in your Google Sheet</p>';
 
     renderPlanItems();
+    renderRoutineItems();
     bindSettings();
+  }
+
+  function renderRoutineItems() {
+    $('#routineItems').innerHTML = draftRoutines.length ? draftRoutines.map(function (rt, i) {
+      const every = !rt.days;
+      return '<div class="plan-item" data-i="' + i + '">' +
+        '<div class="grid-2"><label class="field"><span>Habit</span><input type="text" data-rk="name" value="' + esc(rt.name) + '" maxlength="80" placeholder="e.g. Morning walk"></label>' +
+        '<label class="field"><span>Planned time</span><input type="text" data-rk="time" value="' + esc(rt.time) + '" maxlength="30" placeholder="e.g. 6:30 AM"></label></div>' +
+        '<div class="day-tabs" style="margin-bottom:8px">' + DAY_SHORT.map(function (d, di) {
+          const on = every || rt.days.indexOf(di) > -1;
+          return '<button type="button" class="' + (on ? 'on' : '') + '" data-rt="day" data-i="' + i + '" data-d="' + di + '" aria-pressed="' + on + '" aria-label="' + DAY_NAMES[di] + '">' + d.slice(0, 2) + '</button>';
+        }).join('') + '</div>' +
+        '<div class="routine-tools">' +
+        '<button class="btn ghost sm" type="button" data-rt="every" data-i="' + i + '"' + (every ? ' disabled' : '') + '>' + (every ? 'Every day' : 'Set every day') + '</button>' +
+        '<span class="spacer"></span>' +
+        '<button class="mini-btn" type="button" data-rt="up" data-i="' + i + '" aria-label="Move up"' + (i === 0 ? ' disabled' : '') + '>▲</button>' +
+        '<button class="mini-btn" type="button" data-rt="down" data-i="' + i + '" aria-label="Move down"' + (i === draftRoutines.length - 1 ? ' disabled' : '') + '>▼</button>' +
+        '<button class="mini-btn" type="button" data-rt="remove" data-i="' + i + '" aria-label="Remove habit">' + ICON.trash + '</button>' +
+        '</div></div>';
+    }).join('') : '<div class="empty">No habits yet. Tap “+ Add habit”.</div>';
   }
 
   function renderPlanItems() {
@@ -1469,12 +1753,14 @@
         if (!lastSynced || Sync.count()) Sync.flush();
       }
       draftPlan = JSON.parse(JSON.stringify(settings.meal_plan));
+    draftRoutines = JSON.parse(JSON.stringify(settings.routines));
       renderSettings();
     });
     $('#syncNow').addEventListener('click', async function () {
       await Sync.flush();
       await Sync.load({ announce: true });
       draftPlan = JSON.parse(JSON.stringify(settings.meal_plan));
+    draftRoutines = JSON.parse(JSON.stringify(settings.routines));
       renderSettings();
     });
 
@@ -1484,6 +1770,7 @@
       if (f.start_date.value && !isValidDate(f.start_date.value)) { toast('Please choose a valid start date', 'err'); return; }
       const posOr = function (v, d) { const n = num(v, NaN); return isFinite(n) && n >= 0 ? n : d; };
       settings.start_date = f.start_date.value;
+      settings.program_days = Math.max(1, Math.min(1000, Math.round(posOr(f.program_days.value, programDays()))));
       ['calorie_target', 'flex_calories', 'protein_target', 'fibre_target', 'water_target_l', 'step_target', 'exercise_target', 'height_cm'].forEach(function (k) {
         settings[k] = posOr(f[k].value, settings[k]);
       });
@@ -1496,19 +1783,58 @@
         min_goals: Math.max(1, Math.min(6, Math.round(posOr(f.min_goals.value, 4)))),
         routine_pct: Math.max(10, Math.min(100, Math.round(posOr(f.routine_pct.value, 80))))
       };
-      saveSettingKeys(['start_date', 'calorie_target', 'flex_calories', 'protein_target', 'fibre_target', 'water_target_l', 'step_target', 'exercise_target', 'height_cm', 'weight_unit', 'streak_rules']);
+      saveSettingKeys(['start_date', 'program_days', 'calorie_target', 'flex_calories', 'protein_target', 'fibre_target', 'water_target_l', 'step_target', 'exercise_target', 'height_cm', 'weight_unit', 'streak_rules']);
       toast('Targets saved', 'ok');
       renderSettings();
     });
 
-    $('#routineForm').addEventListener('submit', function (e) {
-      e.preventDefault();
-      settings.routines = settings.routines.map(function (rt) {
-        const v = e.target['time_' + rt.key];
-        return Object.assign({}, rt, { time: v && v.value.trim() ? v.value.trim() : rt.time });
-      });
+    $$('[data-extend]').forEach(function (b) {
+      b.addEventListener('click', function () { extendProgram(num(b.dataset.extend)); renderSettings(); });
+    });
+
+    const routineCard = $('#routineCard');
+    routineCard.addEventListener('click', function (e) {
+      const b = e.target.closest('[data-rt]');
+      if (!b) return;
+      const i = num(b.dataset.i), rt = draftRoutines[i];
+      switch (b.dataset.rt) {
+        case 'day': {
+          const d = num(b.dataset.d);
+          const days = rt.days ? rt.days.slice() : [0, 1, 2, 3, 4, 5, 6];
+          const at = days.indexOf(d);
+          if (at > -1) days.splice(at, 1); else days.push(d);
+          days.sort();
+          if (!days.length) { toast('A habit needs at least one day', 'err'); return; }
+          rt.days = days.length === 7 ? null : days;
+          break;
+        }
+        case 'every': rt.days = null; break;
+        case 'up': if (i > 0) draftRoutines.splice(i - 1, 0, draftRoutines.splice(i, 1)[0]); break;
+        case 'down': if (i < draftRoutines.length - 1) draftRoutines.splice(i + 1, 0, draftRoutines.splice(i, 1)[0]); break;
+        case 'remove':
+          if (!confirm('Remove "' + (rt.name || 'this habit') + '" from your routine? Past ticks stay in your Google Sheet.')) return;
+          draftRoutines.splice(i, 1); break;
+      }
+      renderRoutineItems();
+    });
+    routineCard.addEventListener('input', function (e) {
+      const k = e.target.dataset.rk;
+      if (!k) return;
+      draftRoutines[num(e.target.closest('.plan-item').dataset.i)][k] = e.target.value;
+    });
+    $('#addRoutine').addEventListener('click', function () {
+      draftRoutines.push({ key: uid('r'), name: '', time: '', days: null });
+      renderRoutineItems();
+      const last = $$('#routineItems .plan-item').pop();
+      if (last) { const inp = $('input[data-rk="name"]', last); if (inp) inp.focus(); }
+    });
+    $('#saveRoutines').addEventListener('click', function () {
+      const cleaned = draftRoutines.map(function (rt) { return Object.assign({}, rt, { name: String(rt.name || '').trim(), time: String(rt.time || '').trim() }); });
+      if (cleaned.some(function (rt) { return !rt.name; })) { toast('Every habit needs a name', 'err'); return; }
+      settings.routines = cleaned;
       saveSettingKeys(['routines']);
-      toast('Routine timings saved', 'ok');
+      toast('Routine saved', 'ok');
+      renderRoutineItems();
     });
 
     const mealCard = $('#mealCard');
@@ -1601,11 +1927,15 @@
     if (startDate() || !$('#modal').hidden) return false;
     const t = todayStr();
     openModal(
-      '<h3 id="sheetTitle">Welcome 🌸</h3><p class="sub">Let’s set up your 60-day transformation. You can change anything later in Settings.</p>' +
+      '<h3 id="sheetTitle">Welcome 🌸</h3><p class="sub">Let’s set up your transformation. You can change anything later in Settings.</p>' +
       '<form id="welcomeForm" novalidate>' +
-      '<label class="field"><span>When does Day 1 start?</span><input type="date" name="start" value="' + t + '" required></label>' +
+      '<div class="grid-2">' +
+      '<label class="field"><span>Day 1 starts</span><input type="date" name="start" value="' + t + '" required></label>' +
+      '<label class="field"><span>Number of days</span><input type="number" inputmode="numeric" name="days" min="1" max="1000" value="' + programDays() + '"></label>' +
+      '</div>' +
+      '<p class="help">Not sure? Start with 60 — you can extend it later.</p>' +
       '<p class="help">Connect your Google Sheet any time from Settings — follow README.md for the one-time setup.</p>' +
-      '<div class="btn-row"><button type="button" class="btn secondary" data-close>Later</button><button class="btn" type="submit">Start my 60 days</button></div>' +
+      '<div class="btn-row"><button type="button" class="btn secondary" data-close>Later</button><button class="btn" type="submit">Start my journey</button></div>' +
       '</form>'
     );
     $('#welcomeForm').addEventListener('submit', function (e) {
@@ -1613,7 +1943,8 @@
       const v = e.target.start.value;
       if (!isValidDate(v)) { toast('Please choose a start date', 'err'); return; }
       settings.start_date = v;
-      saveSettingKeys(['start_date']);
+      settings.program_days = Math.max(1, Math.min(1000, Math.round(num(e.target.days.value, DEFAULT_LEN))));
+      saveSettingKeys(['start_date', 'program_days']);
       closeModal(); renderAll();
       toast('Day 1 is ' + prettyDate(v, true) + '. You’ve got this!', 'ok');
     });
